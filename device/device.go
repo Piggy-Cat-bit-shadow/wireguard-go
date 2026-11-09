@@ -480,9 +480,7 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 		return nil
 	}
 	p.SetAllowedIPs(conf.AllowedIPs)
-	// Apply the pre-shared key before the peer's handshake routines start. The
-	// peer is not running yet, so no other goroutine touches the handshake state.
-	p.handshake.presharedKey = conf.PresharedKey
+	p.SetPresharedKey(conf.PresharedKey)
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
 		p.SetEndpointFromPacket(conf.Endpoint)
