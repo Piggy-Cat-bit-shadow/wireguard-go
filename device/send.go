@@ -1143,3 +1143,37 @@ func (peer *Peer) wakeOutboundWaiters() {
 
 // maxQueuedOutboundPackets bounds the staged+outbound backlog WritePackets waits on.
 const maxQueuedOutboundPackets = 1024
+
+// newInputElement allocates an outbound element for one injected IP packet, using the AWG-aware
+// layout so obfuscation headroom and padding are reserved the same way as the inbound path.
+func (device *Device) newInputElement(packet []byte) *QueueOutboundElement {
+	padding, offset, allocLength := device.outboundLayout(len(packet))
+	if allocLength == 0 {
+		return nil
+	}
+	elem := device.GetOutboundElement()
+	elem.buffer = device.GetOutboundBuffer(allocLength)
+	elem.nonce = 0
+	elem.padding = padding
+	elem.isKeepalive = false
+	elem.packet = elem.buffer[offset:][:copy(elem.buffer[offset:], packet)]
+	return elem
+}
+
+// WritePackets injects whole IP packets routed to this peer, blocking while the outbound
+// pipeline is full. It is the blocking half of the injection API the fork's TUN router uses.
+func (peer *Peer) WritePackets(packets [][]byte) {
+	for _, packet := range packets {
+		if !peer.waitOutboundSpace() {
+			return
+		}
+		elem := peer.device.newInputElement(packet)
+		if elem == nil {
+			continue
+		}
+		container := peer.device.GetOutboundElementsContainer()
+		container.elems = append(container.elems, elem)
+		peer.StagePackets(container)
+		peer.SendStagedPackets()
+	}
+}
