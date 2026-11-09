@@ -1109,3 +1109,37 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 
 	peer.keepKeyFreshSending()
 }
+
+// waitOutboundSpace blocks while the peer's outbound pipeline is full, and
+// reports false when the peer stops. It is the blocking half of WritePackets:
+// injection waits instead of dropping, unlike InputPackets.
+func (peer *Peer) waitOutboundSpace() bool {
+	for {
+		if !peer.isRunning.Load() {
+			return false
+		}
+		if peer.queuedOutboundPackets.Load() < maxQueuedOutboundPackets {
+			return true
+		}
+		peer.outboundSpace.Lock()
+		if peer.outboundSpace.ready == nil {
+			peer.outboundSpace.ready = make(chan struct{})
+		}
+		ready := peer.outboundSpace.ready
+		peer.outboundSpace.Unlock()
+		<-ready
+	}
+}
+
+// wakeOutboundWaiters releases every goroutine blocked in waitOutboundSpace.
+func (peer *Peer) wakeOutboundWaiters() {
+	peer.outboundSpace.Lock()
+	if peer.outboundSpace.ready != nil {
+		close(peer.outboundSpace.ready)
+		peer.outboundSpace.ready = nil
+	}
+	peer.outboundSpace.Unlock()
+}
+
+// maxQueuedOutboundPackets bounds the staged+outbound backlog WritePackets waits on.
+const maxQueuedOutboundPackets = 1024
