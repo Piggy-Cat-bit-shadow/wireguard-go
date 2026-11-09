@@ -480,6 +480,9 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 		return nil
 	}
 	p.SetAllowedIPs(conf.AllowedIPs)
+	// Apply the pre-shared key before the peer's handshake routines start. The
+	// peer is not running yet, so no other goroutine touches the handshake state.
+	p.handshake.presharedKey = conf.PresharedKey
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
 		p.SetEndpointFromPacket(conf.Endpoint)
@@ -547,6 +550,10 @@ func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool
 type NewPeerConfig struct {
 	// AllowedIPs is the initial set of allowed IPs for the new peer.
 	AllowedIPs []netip.Prefix
+
+	// PresharedKey is the optional WireGuard pre-shared key. The zero value
+	// disables the pre-shared-key layer.
+	PresharedKey NoisePresharedKey
 
 	// Endpoint, if non-nil, sets the initial endpoint for newly
 	// created peers.
