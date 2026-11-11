@@ -747,7 +747,7 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 		}
 		select {
 		case tooOld := <-peer.queue.staged:
-			peer.queuedOutboundPackets.Add(-int32(len(tooOld.elems)))
+			peer.releaseOutboundPackets(int32(len(tooOld.elems)))
 			for _, elem := range tooOld.elems {
 				peer.device.PutOutboundBuffer(elem.buffer)
 				peer.device.PutOutboundElement(elem)
@@ -796,7 +796,7 @@ top:
 
 			if elemsContainerOOO != nil {
 				// Already counted at their original staging; StagePackets will count them again.
-				peer.queuedOutboundPackets.Add(-int32(len(elemsContainerOOO.elems)))
+				peer.releaseOutboundPackets(int32(len(elemsContainerOOO.elems)))
 				peer.StagePackets(elemsContainerOOO) // XXX: Out of order, but we can't front-load go chans
 			}
 
@@ -811,7 +811,7 @@ top:
 				peer.queue.outbound.c <- elemsContainer
 				peer.device.queue.encryption.c <- elemsContainer
 			} else {
-				peer.queuedOutboundPackets.Add(-int32(len(elemsContainer.elems)))
+				peer.releaseOutboundPackets(int32(len(elemsContainer.elems)))
 				for _, elem := range elemsContainer.elems {
 					peer.device.PutOutboundBuffer(elem.buffer)
 					peer.device.PutOutboundElement(elem)
@@ -832,7 +832,7 @@ func (peer *Peer) FlushStagedPackets() {
 	for {
 		select {
 		case elemsContainer := <-peer.queue.staged:
-			peer.queuedOutboundPackets.Add(-int32(len(elemsContainer.elems)))
+			peer.releaseOutboundPackets(int32(len(elemsContainer.elems)))
 			for _, elem := range elemsContainer.elems {
 				peer.device.PutOutboundBuffer(elem.buffer)
 				peer.device.PutOutboundElement(elem)
@@ -1066,7 +1066,7 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 		// The timers and SendBuffers code are resilient to a few stragglers.
 		// TODO: rework peer shutdown order to ensure
 		// that we never accidentally keep timers alive longer than necessary.
-		peer.queuedOutboundPackets.Add(-int32(len(elemsContainer.elems)))
+		peer.releaseOutboundPackets(int32(len(elemsContainer.elems)))
 		for _, elem := range elemsContainer.elems {
 			device.PutOutboundBuffer(elem.buffer)
 			device.PutOutboundElement(elem)
@@ -1096,7 +1096,7 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 			peer.timersDataSent()
 		}
 	}
-	peer.queuedOutboundPackets.Add(-int32(len(elemsContainer.elems)))
+	peer.releaseOutboundPackets(int32(len(elemsContainer.elems)))
 	for _, elem := range elemsContainer.elems {
 		device.PutOutboundBuffer(elem.buffer)
 		device.PutOutboundElement(elem)
@@ -1113,19 +1113,26 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 // waitOutboundSpace blocks while the peer's outbound pipeline is full, and
 // reports false when the peer stops. It is the blocking half of WritePackets:
 // injection waits instead of dropping, unlike InputPackets.
+//
+// The waiter registers its wake channel BEFORE the final space check. A release
+// between the check and the registration would otherwise close a channel nobody
+// is waiting on yet, and the writer would sleep with space available. With the
+// registration first, either the release sees the channel and closes it, or the
+// check sees the freed space and returns.
 func (peer *Peer) waitOutboundSpace() bool {
 	for {
 		if !peer.isRunning.Load() {
 			return false
-		}
-		if peer.queuedOutboundPackets.Load() < maxQueuedOutboundPackets {
-			return true
 		}
 		peer.outboundSpace.Lock()
 		if peer.outboundSpace.ready == nil {
 			peer.outboundSpace.ready = make(chan struct{})
 		}
 		ready := peer.outboundSpace.ready
+		if peer.queuedOutboundPackets.Load() < maxQueuedOutboundPackets {
+			peer.outboundSpace.Unlock()
+			return true
+		}
 		peer.outboundSpace.Unlock()
 		<-ready
 	}
@@ -1139,6 +1146,23 @@ func (peer *Peer) wakeOutboundWaiters() {
 		peer.outboundSpace.ready = nil
 	}
 	peer.outboundSpace.Unlock()
+}
+
+// releaseOutboundPackets returns n packets of outbound backlog and wakes any
+// writer parked in waitOutboundSpace once the backlog is below the cap.
+//
+// Every decrement must go through here. Before this helper existed the waiters
+// were only woken by Peer.Stop: the backlog could drain completely while the
+// writer that filled it stayed parked forever, which is the userspace
+// WireGuard/AWG stall (B7).
+func (peer *Peer) releaseOutboundPackets(count int32) {
+	if count <= 0 {
+		return
+	}
+	remaining := peer.queuedOutboundPackets.Add(-count)
+	if remaining < maxQueuedOutboundPackets {
+		peer.wakeOutboundWaiters()
+	}
 }
 
 // maxQueuedOutboundPackets bounds the staged+outbound backlog WritePackets waits on.

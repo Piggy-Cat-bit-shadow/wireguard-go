@@ -261,6 +261,10 @@ func (peer *Peer) Start() {
 	peer.stopping.Wait()
 	peer.stopping.Add(2)
 	peer.queuedOutboundPackets.Store(0)
+	// A writer parked on the old backlog must observe the reset; Stop wakes it,
+	// but a Start without a preceding Stop (or a restart path) must not leave it
+	// asleep against a zero counter.
+	peer.wakeOutboundWaiters()
 
 	peer.handshake.mutex.Lock()
 	peer.handshake.lastSentHandshake = time.Now().Add(-(peer.device.rekeyMinTimeout() + time.Second))
