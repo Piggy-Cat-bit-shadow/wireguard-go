@@ -525,7 +525,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 	return &msg, nil
 }
 
-func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
+func (device *Device) ConsumeMessageResponse(msg *MessageResponse) (peer *Peer) {
 	if msg.Type != MessageResponseType {
 		return nil
 	}
@@ -539,8 +539,9 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 	}
 
 	var (
-		hash     [blake2s.Size]byte
-		chainKey [blake2s.Size]byte
+		hash           [blake2s.Size]byte
+		chainKey       [blake2s.Size]byte
+		localEphemeral NoisePrivateKey
 	)
 
 	// Snapshot the static private key before acquiring handshake.mutex so
@@ -601,6 +602,11 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 			return false
 		}
 		mixHash(&hash, &hash, msg.Empty[:])
+
+		// allow unlocking temporarily
+
+		copy(localEphemeral[:], handshake.localEphemeral[:])
+
 		return true
 	}()
 
@@ -611,18 +617,27 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 	// update handshake state
 
 	handshake.mutex.Lock()
-
-	handshake.hash = hash
-	handshake.chainKey = chainKey
-	handshake.remoteIndex = msg.Sender
-	handshake.state = handshakeResponseConsumed
+	// Two response messages can be in flight for the same initiation. The one that finished
+	// verifying first may already have consumed the state and a fresh initiation may already
+	// have replaced the ephemeral key, so the state is only advanced when it is still the
+	// initiation this message was verified against; otherwise this message would build a second
+	// session out of a handshake that has moved on.
+	if handshake.state == handshakeInitiationCreated &&
+		handshake.localEphemeral.Equals(localEphemeral) {
+		handshake.hash = hash
+		handshake.chainKey = chainKey
+		handshake.remoteIndex = msg.Sender
+		handshake.state = handshakeResponseConsumed
+		peer = lookup.peer
+	}
 
 	handshake.mutex.Unlock()
 
 	setZero(hash[:])
 	setZero(chainKey[:])
+	setZero(localEphemeral[:])
 
-	return lookup.peer
+	return
 }
 
 /* Derives a new keypair from the current handshake state
