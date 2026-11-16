@@ -179,8 +179,13 @@ func TestAWG3EndToEnd(t *testing.T) {
 	sendBack()
 	awaitPacket(t, pair.tunA, pktBack, sendBack)
 
-	// A -> B over the injection path (tightly allocated element).
-	pktInject := buildIPv4Packet(testIPA, testIPB, 8)
+	// A -> B over the injection path (tightly allocated element). A 91-byte
+	// payload gives a 111-byte IPv4 packet, i.e. 155 bytes on the wire without
+	// an addition and 165..255 with content_padding_addition=10-100. It can
+	// therefore never equal the 164-byte wire length of the 100-byte TUN
+	// packet without an addition, which is what the exact-length assertion
+	// below is looking for.
+	pktInject := buildIPv4Packet(testIPA, testIPB, 91)
 	sendInject := func() { pair.devA.InputPacket(testIPB.AsSlice(), [][]byte{pktInject}) }
 	sendInject()
 	awaitPacket(t, pair.tunB, pktInject, sendInject)
